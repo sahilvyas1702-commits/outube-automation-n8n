@@ -1,0 +1,207 @@
+{
+  "name": "01-trend-detection",
+  "nodes": [
+    {
+      "parameters": {
+        "interval": 1,
+        "unit": "days"
+      },
+      "id": "81d5d87d-29d0-4d50-8d03-b7e1c8e3f5a2",
+      "name": "Trigger - Schedule Daily",
+      "type": "n8n-nodes-base.cronTrigger",
+      "typeVersion": 1,
+      "position": [250, 100]
+    },
+    {
+      "parameters": {
+        "url": "https://www.reddit.com/r/all/hot.json",
+        "authentication": "generic",
+        "httpMethod": "GET",
+        "headers": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "={{ $env.REDDIT_USER_AGENT }}"
+            }
+          ]
+        }
+      },
+      "id": "92e5e92a-40f1-4c5c-9f3e-d8c1e2f4g6b3",
+      "name": "Reddit - Fetch Trending",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [500, 100]
+    },
+    {
+      "parameters": {
+        "url": "https://newsapi.org/v2/top-headlines",
+        "httpMethod": "GET",
+        "qs": {
+          "parameters": [
+            {
+              "name": "apiKey",
+              "value": "={{ $env.NEWSAPI_KEY }}"
+            },
+            {
+              "name": "sortBy",
+              "value": "popularity"
+            },
+            {
+              "name": "pageSize",
+              "value": "20"
+            }
+          ]
+        }
+      },
+      "id": "a3f6g7h8-51b2-4d7e-8f4g-h5i6j7k8l9m0",
+      "name": "NewsAPI - Fetch Top Headlines",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const redditData = $input.first().json.data || {};\nconst children = redditData.children || [];\n\nconst trends = children.slice(0, 10).map(post => ({\n  source: 'reddit',\n  title: post.data.title,\n  url: post.data.url,\n  score: post.data.score,\n  comments: post.data.num_comments,\n  timestamp: new Date().toISOString(),\n  id: post.data.id,\n  subreddit: post.data.subreddit\n}));\n\nreturn trends;"
+      },
+      "id": "b4g7h8i9-62c3-4e8f-9g5h-i6j7k8l9m0n1",
+      "name": "Process - Parse Reddit Trends",
+      "type": "n8n-nodes-base.functionItem",
+      "typeVersion": 1,
+      "position": [750, 100]
+    },
+    {
+      "parameters": {
+        "functionCode": "const newsData = $input.first().json.articles || [];\n\nconst trends = newsData.slice(0, 10).map(article => ({\n  source: 'news',\n  title: article.title,\n  description: article.description,\n  url: article.url,\n  image: article.urlToImage,\n  timestamp: new Date().toISOString(),\n  id: article.url.replace(/\\//g, '_'),\n  author: article.author,\n  publishedAt: article.publishedAt\n}));\n\nreturn trends;"
+      },
+      "id": "c5h8i9j0-73d4-4f9g-0h6i-j7k8l9m0n1o2",
+      "name": "Process - Parse News Trends",
+      "type": "n8n-nodes-base.functionItem",
+      "typeVersion": 1,
+      "position": [750, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const redditTrends = items[0]?.json || [];\nconst newsTrends = items[1]?.json || [];\n\nconst allTrends = [...redditTrends, ...newsTrends];\n\nconst seen = new Set();\nconst uniqueTrends = [];\n\nfor (const trend of allTrends) {\n  const titleLower = (trend.title || '').toLowerCase().substring(0, 50);\n  if (!seen.has(titleLower)) {\n    seen.add(titleLower);\n    uniqueTrends.push(trend);\n  }\n}\n\nconst sorted = uniqueTrends.sort((a, b) => {\n  const scoreA = (a.score || 0) + (a.comments || 0);\n  const scoreB = (b.score || 0) + (b.comments || 0);\n  return scoreB - scoreA;\n});\n\nreturn [{\n  json: {\n    trends: sorted.slice(0, 20),\n    count: sorted.length,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "d6i9j0k1-84e5-4g0h-1i7j-k8l9m0n1o2p3",
+      "name": "Process - Combine & Deduplicate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1000, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_URL }}/webhook/store-trends",
+        "bodyParametersUi": "json",
+        "bodyJson": "{\n  \"trends\": \"={{ $node['Process - Combine & Deduplicate'].json.trends }}\",\n  \"count\": \"={{ $node['Process - Combine & Deduplicate'].json.count }}\",\n  \"timestamp\": \"={{ $node['Process - Combine & Deduplicate'].json.timestamp }}\",\n  \"status\": \"processed\"\n}"
+      },
+      "id": "e7j0k1l2-95f6-4h1i-2j8k-l9m0n1o2p3q4",
+      "name": "Store - Save Trends",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1250, 200]
+    },
+    {
+      "parameters": {
+        "content": "=Trends Detection Complete!\n\nFound {{ $node['Process - Combine & Deduplicate'].json.count }} trending topics\n\nTop trend: {{ $node['Process - Combine & Deduplicate'].json.trends[0].title }}"
+      },
+      "id": "f8k1l2m3-06g7-4i2j-3k9l-m0n1o2p3q4r5",
+      "name": "Log - Success",
+      "type": "n8n-nodes-base.logStreamMessage",
+      "typeVersion": 1,
+      "position": [1500, 100]
+    }
+  ],
+  "connections": {
+    "Trigger - Schedule Daily": {
+      "main": [
+        [
+          {
+            "node": "Reddit - Fetch Trending",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "NewsAPI - Fetch Top Headlines",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reddit - Fetch Trending": {
+      "main": [
+        [
+          {
+            "node": "Process - Parse Reddit Trends",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NewsAPI - Fetch Top Headlines": {
+      "main": [
+        [
+          {
+            "node": "Process - Parse News Trends",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process - Parse Reddit Trends": {
+      "main": [
+        [
+          {
+            "node": "Process - Combine & Deduplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process - Parse News Trends": {
+      "main": [
+        [
+          {
+            "node": "Process - Combine & Deduplicate",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Process - Combine & Deduplicate": {
+      "main": [
+        [
+          {
+            "node": "Store - Save Trends",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store - Save Trends": {
+      "main": [
+        [
+          {
+            "node": "Log - Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "any"
+  },
+  "tags": ["trending", "reddit", "news", "automation"]
+}

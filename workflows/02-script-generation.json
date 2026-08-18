@@ -1,0 +1,190 @@
+{
+  "name": "02-script-generation",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST"
+      },
+      "id": "a1b2c3d4-e5f6-4g7h-8i9j-k0l1m2n3o4p5",
+      "name": "Trigger - Receive Trend",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 100],
+      "webhookId": "generate-script-webhook"
+    },
+    {
+      "parameters": {
+        "functionCode": "const trend = $input.json;\n\nif (!trend.title) {\n  throw new Error('Invalid trend data: missing title');\n}\n\nreturn {\n  title: trend.title,\n  description: trend.description || '',\n  source: trend.source || 'unknown',\n  url: trend.url,\n  keywords: extractKeywords(trend.title),\n  timestamp: new Date().toISOString()\n};\n\nfunction extractKeywords(text) {\n  return text.split(' ')\n    .filter(word => word.length > 3)\n    .slice(0, 5);\n}"
+      },
+      "id": "b2c3d4e5-f6g7-4h8i-9j0k-l1m2n3o4p5q6",
+      "name": "Process - Validate Trend Data",
+      "type": "n8n-nodes-base.functionItem",
+      "typeVersion": 1,
+      "position": [500, 100]
+    },
+    {
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "credentialType": "openAiApi",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "requestMethod": "POST",
+        "bodyParametersUi": "json",
+        "bodyJson": "{\n  \"model\": \"{{ $env.OPENAI_MODEL }}\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a creative video script writer. Create engaging 30-60 second scripts for YouTube videos based on trending topics. Make it entertaining, informative, and suitable for monetization. Include visual cues in [brackets].\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Write a script for a video about: {{ $node['Process - Validate Trend Data'].json.title }}. Keywords: {{ $node['Process - Validate Trend Data'].json.keywords.join(', ') }}\"\n    }\n  ],\n  \"max_tokens\": 500,\n  \"temperature\": 0.7\n}"
+      },
+      "id": "c3d4e5f6-g7h8-4i9j-0k1l-m2n3o4p5q6r7",
+      "name": "OpenAI - Generate Script",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [750, 100]
+    },
+    {
+      "parameters": {
+        "functionCode": "const response = $input.json;\n\nif (!response.choices || response.choices.length === 0) {\n  throw new Error('No script generated from OpenAI');\n}\n\nconst scriptContent = response.choices[0].message.content;\n\nreturn {\n  script: scriptContent,\n  title: generateTitle(\"{{ $node['Process - Validate Trend Data'].json.title }}\"),\n  description: generateDescription(\"{{ $node['Process - Validate Trend Data'].json.title }}\"),\n  keywords: \"{{ $node['Process - Validate Trend Data'].json.keywords.join(', ') }}\",\n  duration_estimate: Math.floor(scriptContent.split(' ').length / 3),\n  status: 'generated',\n  timestamp: new Date().toISOString()\n};\n\nfunction generateTitle(trend) {\n  return `Why Everyone's Talking About ${trend} | Trending Now`;\n}\n\nfunction generateDescription(trend) {\n  return `Discover why ${trend} is trending right now. In this video, we break down the latest developments. Don't miss out on this viral topic!`;\n}"
+      },
+      "id": "d4e5f6g7-h8i9-4j0k-1l2m-n3o4p5q6r7s8",
+      "name": "Process - Format Script Output",
+      "type": "n8n-nodes-base.functionItem",
+      "typeVersion": 1,
+      "position": [1000, 100]
+    },
+    {
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "credentialType": "openAiApi",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "requestMethod": "POST",
+        "bodyParametersUi": "json",
+        "bodyJson": "{\n  \"model\": \"{{ $env.OPENAI_MODEL }}\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a YouTube SEO expert. Generate 5 alternative titles and 5 relevant hashtags for a video. Format as JSON with 'titles' and 'tags' arrays.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Generate SEO-optimized metadata for this video about: {{ $node['Process - Validate Trend Data'].json.title }}\"\n    }\n  ],\n  \"max_tokens\": 300,\n  \"temperature\": 0.8\n}"
+      },
+      "id": "e5f6g7h8-i9j0-4k1l-2m3n-o4p5q6r7s8t9",
+      "name": "OpenAI - Generate Metadata",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1000, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const scriptData = items[0]?.json || {};\nconst metadataData = items[1]?.json || {};\n\nlet metadata = { titles: [], tags: [] };\nif (metadataData.choices && metadataData.choices[0]) {\n  try {\n    metadata = JSON.parse(metadataData.choices[0].message.content);\n  } catch (e) {\n    console.log('Could not parse metadata JSON');\n  }\n}\n\nreturn [{\n  json: {\n    script: scriptData.script,\n    title: scriptData.title,\n    alternate_titles: metadata.titles || [],\n    description: scriptData.description,\n    keywords: scriptData.keywords,\n    tags: metadata.tags || [],\n    duration_estimate: scriptData.duration_estimate,\n    status: 'ready_for_voiceover',\n    created_at: new Date().toISOString(),\n    workflow_version: '2.0'\n  }\n}];"
+      },
+      "id": "f6g7h8i9-j0k1-4l2m-3n4o-p5q6r7s8t9u0",
+      "name": "Process - Combine Final Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 150]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_URL }}/webhook/script-generated",
+        "bodyParametersUi": "json",
+        "bodyJson": "{\n  \"script_data\": \"={{ $node['Process - Combine Final Output'].json }}\",\n  \"source_trend\": \"{{ $node['Process - Validate Trend Data'].json.source }}\",\n  \"ready_for_next_step\": true\n}"
+      },
+      "id": "g7h8i9j0-k1l2-4m3n-4o5p-q6r7s8t9u0v1",
+      "name": "Store - Save Generated Script",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1500, 150]
+    },
+    {
+      "parameters": {
+        "content": "=Script Generated Successfully!\n\nTitle: {{ $node['Process - Combine Final Output'].json.title }}\nEstimated Duration: {{ $node['Process - Combine Final Output'].json.duration_estimate }} seconds\nStatus: {{ $node['Process - Combine Final Output'].json.status }}"
+      },
+      "id": "h8i9j0k1-l2m3-4n4o-5p6q-r7s8t9u0v1w2",
+      "name": "Log - Script Generated",
+      "type": "n8n-nodes-base.logStreamMessage",
+      "typeVersion": 1,
+      "position": [1750, 100]
+    }
+  ],
+  "connections": {
+    "Trigger - Receive Trend": {
+      "main": [
+        [
+          {
+            "node": "Process - Validate Trend Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process - Validate Trend Data": {
+      "main": [
+        [
+          {
+            "node": "OpenAI - Generate Script",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "OpenAI - Generate Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI - Generate Script": {
+      "main": [
+        [
+          {
+            "node": "Process - Format Script Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI - Generate Metadata": {
+      "main": [
+        [
+          {
+            "node": "Process - Combine Final Output",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Process - Format Script Output": {
+      "main": [
+        [
+          {
+            "node": "Process - Combine Final Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process - Combine Final Output": {
+      "main": [
+        [
+          {
+            "node": "Store - Save Generated Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store - Save Generated Script": {
+      "main": [
+        [
+          {
+            "node": "Log - Script Generated",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "webhook"
+  },
+  "tags": ["scripting", "openai", "content-generation", "automation"]
+}
