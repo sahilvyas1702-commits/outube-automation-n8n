@@ -1,0 +1,209 @@
+{
+  "name": "05-youtube-upload",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "upload-to-youtube",
+        "responseMode": "onReceived",
+        "method": "POST"
+      },
+      "id": "01yt-trigger-webhook",
+      "name": "Trigger - Receive Video",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 100]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Validate input from Phase 3b\nconst videoData = $input.first().json;\n\n// Validate required fields\nif (!videoData.long_form_video || !videoData.long_form_video.url) {\n  throw new Error('Missing long-form video URL');\n}\n\nif (!videoData.script_id || typeof videoData.script_id !== 'string') {\n  throw new Error('Missing or invalid script_id');\n}\n\nif (!videoData.title || typeof videoData.title !== 'string' || videoData.title.length < 5) {\n  throw new Error('Title must be at least 5 characters');\n}\n\nif (!videoData.description || typeof videoData.description !== 'string') {\n  throw new Error('Missing description');\n}\n\nif (!Array.isArray(videoData.tags) || videoData.tags.length === 0) {\n  throw new Error('At least 1 tag required');\n}\n\nif (!videoData.category_id || typeof videoData.category_id !== 'string') {\n  throw new Error('Missing category_id (YouTube category)');\n}\n\n// Validate title length (YouTube: 1-100 characters)\nif (videoData.title.length > 100) {\n  throw new Error('Title exceeds 100 characters');\n}\n\n// Validate description length (YouTube: 0-5000 characters)\nif (videoData.description.length > 5000) {\n  throw new Error('Description exceeds 5000 characters');\n}\n\n// Validate tags (max 30, each max 30 chars)\nif (videoData.tags.length > 30) {\n  throw new Error('Maximum 30 tags allowed');\n}\n\nfor (const tag of videoData.tags) {\n  if (tag.length > 30) {\n    throw new Error(`Tag \"${tag}\" exceeds 30 characters`);\n  }\n}\n\n// Validate privacy status (default to private)\nconst validPrivacyStatuses = ['private', 'unlisted', 'public'];\nconst privacyStatus = videoData.privacy_status || 'private';\nif (!validPrivacyStatuses.includes(privacyStatus)) {\n  throw new Error(`Invalid privacy_status: ${privacyStatus}. Must be: ${validPrivacyStatuses.join(', ')}`);\n}\n\n// Validate video format (must be .mp4)\nif (!videoData.long_form_video.url.endsWith('.mp4')) {\n  throw new Error('Only MP4 format supported');\n}\n\n// Validate video duration (minimum 5 seconds, maximum 12 hours)\nconst durationSeconds = videoData.long_form_video.duration_seconds || 0;\nif (durationSeconds < 5) {\n  throw new Error('Video too short (minimum 5 seconds)');\n}\nif (durationSeconds > 43200) {\n  throw new Error('Video too long (maximum 12 hours)');\n}\n\nreturn {\n  ...videoData,\n  privacy_status: privacyStatus,\n  validation_status: 'passed',\n  validated_at: new Date().toISOString(),\n  validation_errors: []\n};"
+      },
+      "id": "02yt-validate-input",
+      "name": "Process - Validate Input",
+      "type": "n8n-nodes-base.functionItem",
+      "typeVersion": 1,
+      "position": [500, 100]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Check for duplicate uploads using script_id metadata\nconst videoData = $input.first().json;\nconst scriptId = videoData.script_id;\n\n// Query stored upload history (simulated - in production, query real database)\nconst uploadHistory = {\n  // Check if script_id already uploaded\n  [scriptId]: null  // null = not uploaded yet\n};\n\nconst existingUpload = uploadHistory[scriptId];\n\nif (existingUpload) {\n  return {\n    script_id: scriptId,\n    is_duplicate: true,\n    existing_youtube_id: existingUpload.youtube_video_id,\n    existing_upload_date: existingUpload.upload_date,\n    status: 'duplicate_detected',\n    message: `This script was already uploaded on ${existingUpload.upload_date}`\n  };\n}\n\n// Not a duplicate - proceed\nreturn {\n  script_id: scriptId,\n  is_duplicate: false,\n  duplicate_check_status: 'passed',\n  checked_at: new Date().toISOString()\n};"
+      },
+      "id": "03yt-check-duplicate",
+      "name": "Process - Check Duplicates",
+      "type": "n8n-nodes-base.functionItem",
+      "typeVersion": 1,
+      "position": [750, 100]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "nodeOutputs": [
+            {
+              "condition": "is_equal",
+              "value1": "={{ $node['Process - Check Duplicates'].json.is_duplicate }}",
+              "value2": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "04yt-check-if-duplicate",
+      "name": "Route - Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [950, 100]
+    },
+    {
+      "parameters": {
+        "content": "=⚠️ DUPLICATE DETECTED\n\nScript ID: {{ $node['Process - Check Duplicates'].json.script_id }}\nAlready uploaded: {{ $node['Process - Check Duplicates'].json.existing_upload_date }}\nYouTube Video ID: {{ $node['Process - Check Duplicates'].json.existing_youtube_id }}\n\nUpload skipped to prevent duplicate content."
+      },
+      "id": "05yt-log-duplicate",
+      "name": "Log - Duplicate Rejected",
+      "type": "n8n-nodes-base.logStreamMessage",
+      "typeVersion": 1,
+      "position": [1200, 250]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Check YouTube API quota before proceeding\n// In production, query youtube.i18nLanguages.list to check real quota\nconst quotaData = {\n  limit: 10000,\n  used: 3500,\n  remaining: 6500,\n  reset_time: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()\n};\n\nconst quotaNeeded = 150; // Typical quota for upload + metadata update\nconst hasEnoughQuota = quotaData.remaining > quotaNeeded;\n\nif (!hasEnoughQuota) {\n  throw new Error(`Insufficient YouTube API quota. Need: ${quotaNeeded}, Available: ${quotaData.remaining}`);\n}\n\nreturn {\n  quota: quotaData,\n  quota_needed: quotaNeeded,\n  sufficient_quota: true,\n  quota_check_status: 'passed',\n  checked_at: new Date().toISOString()\n};"
+      },
+      "id": "06yt-check-quota",
+      "name": "Process - Check Quota",
+      "type": "n8n-nodes-base.functionItem",
+      "typeVersion": 1,
+      "position": [1200, 100]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare metadata for manual approval\nconst videoData = $input.first().json;\n\nconst approvalRequest = {\n  approval_id: `approval-${videoData.script_id}-${Date.now()}`,\n  script_id: videoData.script_id,\n  created_at: new Date().toISOString(),\n  expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),\n  \n  video_content: {\n    title: videoData.title,\n    description: videoData.description,\n    duration_seconds: videoData.long_form_video.duration_seconds || 0,\n    video_url: videoData.long_form_video.url,\n    format: 'MP4'\n  },\n  \n  metadata: {\n    tags: videoData.tags || [],\n    category_id: videoData.category_id,\n    category_name: getCategoryName(videoData.category_id),\n    language: videoData.language || 'en',\n    default_language: videoData.default_language || 'en',\n    keywords: videoData.keywords || []\n  },\n  \n  privacy: {\n    status: videoData.privacy_status || 'private',\n    embeddable: videoData.embeddable !== false,\n    allow_comments: videoData.allow_comments !== false,\n    allow_ratings: videoData.allow_ratings !== false,\n    made_for_kids: videoData.made_for_kids === true\n  },\n  \n  shorts_available: !!videoData.shorts_video,\n  long_form_available: !!videoData.long_form_video,\n  \n  approval_status: 'pending',\n  approver: null,\n  approval_decision: null,\n  approval_timestamp: null,\n  approval_comments: ''\n};\n\nfunction getCategoryName(categoryId) {\n  const categories = {\n    '1': 'Film & Animation',\n    '2': 'Autos & Vehicles',\n    '10': 'Music',\n    '15': 'Pets & Animals',\n    '17': 'Sports',\n    '18': 'Short Movies',\n    '19': 'Travel & Events',\n    '20': 'Gaming',\n    '21': 'Videoblogging',\n    '22': 'People & Blogs',\n    '23': 'Comedy',\n    '24': 'Entertainment',\n    '25': 'News & Politics',\n    '26': 'Howto & Style',\n    '27': 'Education',\n    '28': 'Science & Technology',\n    '29': 'Nonprofits & Activism',\n    '30': 'Movies',\n    '31': 'Anime/Animation',\n    '32': 'Action/Adventure',\n    '33': 'Classics',\n    '34': 'Comedies',\n    '35': 'Documentaries',\n    '36': 'Dramas',\n    '37': 'Family',\n    '38': 'Foreign',\n    '39': 'Horror',\n    '40': 'Sci-Fi/Fantasy',\n    '41': 'Thrillers',\n    '44': 'Shorts',\n    '52': 'Trailers',\n    '53': 'Shows',\n    '54': 'Trailers'\n  };\n  return categories[categoryId] || 'Unknown';\n}\n\nreturn approvalRequest;"
+      },
+      "id": "07yt-prepare-approval",
+      "name": "Process - Prepare Approval",
+      "type": "n8n-nodes-base.functionItem",
+      "typeVersion": 1,
+      "position": [1500, 100]
+    },
+    {
+      "parameters": {
+        "content": "=📋 MANUAL APPROVAL REQUIRED\n\nScript ID: {{ $node['Process - Prepare Approval'].json.script_id }}\nApproval ID: {{ $node['Process - Prepare Approval'].json.approval_id }}\n\n📹 VIDEO CONTENT:\nTitle: {{ $node['Process - Prepare Approval'].json.video_content.title }}\nDuration: {{ $node['Process - Prepare Approval'].json.video_content.duration_seconds }}s\nFormat: {{ $node['Process - Prepare Approval'].json.video_content.format }}\n\n📝 METADATA:\nCategory: {{ $node['Process - Prepare Approval'].json.metadata.category_name }}\nTags: {{ $node['Process - Prepare Approval'].json.metadata.tags.join(', ') }}\nLanguage: {{ $node['Process - Prepare Approval'].json.metadata.language }}\n\n🔒 PRIVACY SETTINGS:\nStatus: {{ $node['Process - Prepare Approval'].json.privacy.status }} (will NOT auto-publish)\nComments Allowed: {{ $node['Process - Prepare Approval'].json.privacy.allow_comments }}\nRatings Allowed: {{ $node['Process - Prepare Approval'].json.privacy.allow_ratings }}\nMade for Kids: {{ $node['Process - Prepare Approval'].json.privacy.made_for_kids }}\n\n✅ AWAITING APPROVAL at {{ $node['Process - Prepare Approval'].json.created_at }}\nExpires: {{ $node['Process - Prepare Approval'].json.expires_at }}"
+      },
+      "id": "08yt-log-awaiting-approval",
+      "name": "Log - Awaiting Approval",
+      "type": "n8n-nodes-base.logStreamMessage",
+      "typeVersion": 1,
+      "position": [1750, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.APPROVAL_WEBHOOK_URL || 'http://localhost:5678/webhook/request-youtube-approval' }}",
+        "bodyParametersUi": "json",
+        "bodyJson": "{{ $node['Process - Prepare Approval'].json }}",
+        "options": {}
+      },
+      "id": "09yt-send-approval-request",
+      "name": "HTTP - Send Approval Request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [2000, 100]
+    },
+    {
+      "parameters": {
+        "path": "approval-decision",
+        "responseMode": "onReceived",
+        "method": "POST"
+      },
+      "id": "10yt-trigger-approval-decision",
+      "name": "Trigger - Approval Decision",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 400]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Validate approval decision\nconst approvalDecision = $input.first().json;\n\nif (!approvalDecision.approval_id) {\n  throw new Error('Missing approval_id');\n}\n\nif (!['approved', 'rejected', 'needs_changes'].includes(approvalDecision.decision)) {\n  throw new Error(`Invalid decision: ${approvalDecision.decision}. Must be: approved, rejected, or needs_changes`);\n}\n\nif (!approvalDecision.approver) {\n  throw new Error('Missing approver information');\n}\n\nreturn {\n  ...approvalDecision,\n  validated_at: new Date().toISOString(),\n  validation_status: 'passed'\n};"
+      },
+      "id": "11yt-validate-approval",
+      "name": "Process - Validate Approval Decision",
+      "type": "n8n-nodes-base.functionItem",
+      "typeVersion": 1,
+      "position": [500, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {\n          \"nodeOutputs\": [\n            {\n              \"condition\": \"is_equal\",\n              \"value1\": \"={{ $node['Process - Validate Approval Decision'].json.decision }}\",\n              \"value2\": \"approved\"\n            }\n          ]\n        },\n        \"options\": {}\n      },
+      "id": "12yt-check-if-approved",
+      "name": "Route - Is Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [750, 400]
+    },
+    {
+      "parameters": {
+        "content": "=✅ APPROVED FOR UPLOAD\n\nApproval ID: {{ $node['Process - Validate Approval Decision'].json.approval_id }}\nApprover: {{ $node['Process - Validate Approval Decision'].json.approver }}\nDecision Timestamp: {{ $node['Process - Validate Approval Decision'].json.timestamp }}\nComments: {{ $node['Process - Validate Approval Decision'].json.comments || 'None' }}\n\nProceeding to upload..."
+      },
+      "id": "13yt-log-approved",
+      "name": "Log - Approved, Starting Upload",
+      "type": "n8n-nodes-base.logStreamMessage",
+      "typeVersion": 1,
+      "position": [1000, 350]
+    },
+    {
+      "parameters": {
+        "content": "=❌ REJECTED\n\nApproval ID: {{ $node['Process - Validate Approval Decision'].json.approval_id }}\nRejector: {{ $node['Process - Validate Approval Decision'].json.approver }}\nDecision: {{ $node['Process - Validate Approval Decision'].json.decision }}\nReason: {{ $node['Process - Validate Approval Decision'].json.comments || 'No reason provided' }}\n\nUpload has been cancelled."
+      },
+      "id": "14yt-log-rejected",
+      "name": "Log - Rejected",
+      "type": "n8n-nodes-base.logStreamMessage",
+      "typeVersion": 1,
+      "position": [1000, 550]
+    },
+    {
+      "parameters": {
+        "url": "https://youtube.googleapis.com/youtube/v3/videos?part=snippet,status&uploadType=resumable",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "youtubeOAuth2Api",
+        "httpMethod": "POST",
+        "bodyParametersUi": "json",
+        "bodyJson": "{\n  \"snippet\": {\n    \"title\": \"={{ $node['09yt-send-approval-request'].json.video_content.title }}\",\n    \"description\": \"={{ $node['09yt-send-approval-request'].json.video_content.description }}\",\n    \"tags\": {{ JSON.stringify($node['09yt-send-approval-request'].json.metadata.tags) }},\n    \"categoryId\": \"={{ $node['09yt-send-approval-request'].json.metadata.category_id }}\",\n    \"defaultLanguage\": \"={{ $node['09yt-send-approval-request'].json.metadata.default_language }}\",\n    \"localized\": {\n      \"title\": \"={{ $node['09yt-send-approval-request'].json.video_content.title }}\",\n      \"description\": \"={{ $node['09yt-send-approval-request'].json.video_content.description }}\"\n    }\n  },\n  \"status\": {\n    \"privacyStatus\": \"={{ $node['09yt-send-approval-request'].json.privacy.status || 'private' }}\",\n    \"embeddable\": {{ $node['09yt-send-approval-request'].json.privacy.embeddable }},\n    \"license\": \"creativeCommon\",\n    \"madeForKids\": {{ $node['09yt-send-approval-request'].json.privacy.made_for_kids }},\n    \"selfDeclaredMadeForKids\": {{ $node['09yt-send-approval-request'].json.privacy.made_for_kids }}\n  },\n  \"processingDetails\": {\n    \"processingStatus\": \"processing\"\n  }\n}",
+        "options": {\n          "headers\": {\n            \"X-Goog-Upload-Protocol\": \"resumable\",\n            \"X-Goog-Upload-Command\": \"start\"\n          }\n        }\n      },
+      "id": "15yt-initiate-resumable-upload",
+      "name": "YouTube - Initiate Resumable Upload",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1250, 350]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract resumable session URI from Location header\nconst response = $input.first();\nconst resumableUri = response.headers?.['location'] || response.headers?.['x-goog-upload-session-uri'];\n\nif (!resumableUri) {\n  throw new Error('Failed to obtain resumable upload session URI from YouTube');\n}\n\nreturn {\n  resumable_uri: resumableUri,\n  video_url: $node['09yt-send-approval-request'].json.video_content.video_url,\n  script_id: $node['09yt-send-approval-request'].json.script_id,\n  session_created_at: new Date().toISOString(),\n  session_expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()\n};"
+      },
+      "id": "16yt-extract-session-uri",
+      "name": "Process - Extract Session URI",
+      "type": "n8n-nodes-base.functionItem",
+      "typeVersion": 1,
+      "position": [1500, 350]
+    },
+    {
+      "parameters": {
+        "url": "={{ $node['Process - Extract Session URI'].json.resumable_uri }}",
+        "httpMethod": "PUT",
+        "bodyParametersUi": "binary",
+        "options": {\n          \"headers\": {\n            \"X-Goog-Upload-Command\": \"upload, finalize\",\n            \"Content-Type\": \"video/mp4\"\n          },\n          \"allowBinaryData\": true\n        }\n      },
+      "id": "17yt-upload-video-content",
+      "name": "YouTube - Upload Video Content",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1750, 350]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Handle upload response and extract video ID\nconst response = $input.first().json;\n\nif (!response.id) {\n  throw new Error('Upload failed: No video ID returned from YouTube');\n}\n\nreturn {\n  youtube_video_id: response.id,\n  script_id: $node['Process - Extract Session URI'].json.script_id,\n  upload_status: 'success',\n  upload_timestamp: new Date().toISOString(),\n  video_status: response.status?.uploadStatus || 'unknown',\n  processing_status: response.processingDetails?.processingStatus || 'processing',\n  privacy_status: response.status?.privacyStatus || 'private',\n  youtube_url: `https://youtube.com/watch?v=${response.id}`,\n  snippet: response.snippet\n};"
+      },
+      "id": "18yt-extract-video-id",
+      "name": "Process - Extract Video ID",
+      "type": "n8n-nodes-base.functionItem",
+      "typeVersion": 1,
+      "position": [2000, 350]
+    },
+    {
+      "parameters": {
+        "method": "POST",\n        "url": "={{ $env.UPLOAD_COMPLETE_WEBHOOK_URL || 'http://localhost:5678/webhook/youtube-upload-complete' }}",\n        "bodyParametersUi\": \"json\",\n        \"bodyJson\": \"{\n  \\\"script_id\\\": \\\"={{ $node['Process - Extract Video ID'].json.script_id }}\\\",\n  \\\"youtube_video_id\\\": \\\"={{ $node['Process - Extract Video ID'].json.youtube_video_id }}\\\",\n  \\\"upload_status\\\": \\\"{{ $node['Process - Extract Video ID'].json.upload_status }}\\\",\n  \\\"upload_timestamp\\\": \\\"={{ $node['Process - Extract Video ID'].json.upload_timestamp }}\\\",\n  \\\"privacy_status\\\": \\\"{{ $node['Process - Extract Video ID'].json.privacy_status }}\\\",\n  \\\"processing_status\\\": \\\"{{ $node['Process - Extract Video ID'].json.processing_status }}\\\",\n  \\\"youtube_url\\\": \\\"{{ $node['Process - Extract Video ID'].json.youtube_url }}\\\"\n}\",\n        \"options\": {}\n      },\n      \"id\": \"19yt-send-completion-notification\",\n      \"name\": \"HTTP - Send Completion Notification\",\n      \"type\": \"n8n-nodes-base.httpRequest\",\n      \"typeVersion\": 4.4,\n      \"position\": [2250, 350]\n    },\n    {\n      \"parameters\": {\n        \"content\": \"=✅ VIDEO UPLOADED SUCCESSFULLY\n\nScript ID: {{ $node['Process - Extract Video ID'].json.script_id }}\nYouTube Video ID: {{ $node['Process - Extract Video ID'].json.youtube_video_id }}\nUpload Status: {{ $node['Process - Extract Video ID'].json.upload_status }}\nPrivacy Status: {{ $node['Process - Extract Video ID'].json.privacy_status }}\nProcessing Status: {{ $node['Process - Extract Video ID'].json.processing_status }}\nYouTube URL: {{ $node['Process - Extract Video ID'].json.youtube_url }}\n\nVideo is now {{ $node['Process - Extract Video ID'].json.privacy_status }} on YouTube.\nProcessing may take 5-60 minutes before public visibility.\nUpload completed at: {{ $node['Process - Extract Video ID'].json.upload_timestamp }}\"\n      },\n      \"id\": \"20yt-log-upload-success\",\n      \"name\": \"Log - Upload Success\",\n      \"type\": \"n8n-nodes-base.logStreamMessage\",\n      \"typeVersion\": 1,\n      \"position\": [2500, 350]\n    },\n    {\n      \"parameters\": {\n        \"functionCode\": \"// Retry handler for upload failures\n// Implements exponential backoff: 5s, 25s, 125s (max 3 attempts)\n\nconst error = $input.first();\nconst retryData = $input.first().context?.retryData || {\n  attempt: 0,\n  max_attempts: 3,\n  backoff_initial_seconds: 5,\n  backoff_max_seconds: 300\n};\n\nconst nextAttempt = retryData.attempt + 1;\nconst backoffSeconds = Math.min(\n  retryData.backoff_initial_seconds * Math.pow(5, retryData.attempt),\n  retryData.backoff_max_seconds\n);\n\nif (nextAttempt > retryData.max_attempts) {\n  throw new Error(`Upload failed after ${retryData.max_attempts} attempts. Last error: ${error.message}`);\n}\n\nreturn {\n  retry_attempt: nextAttempt,\n  max_attempts: retryData.max_attempts,\n  next_retry_after_seconds: backoffSeconds,\n  next_retry_timestamp: new Date(Date.now() + backoffSeconds * 1000).toISOString(),\n  error_message: error.message || 'Unknown upload error',\n  should_retry: true\n};\"\n      },\n      \"id\": \"21yt-handle-retry\",\n      \"name\": \"Process - Handle Retry\",\n      \"type\": \"n8n-nodes-base.functionItem\",\n      \"typeVersion\": 1,\n      \"position\": [1750, 550]\n    },\n    {\n      \"parameters\": {\n        \"content\": \"=⚠️ UPLOAD FAILED - RETRY {{ $node['Process - Handle Retry'].json.retry_attempt }}/{{ $node['Process - Handle Retry'].json.max_attempts }}\n\nError: {{ $node['Process - Handle Retry'].json.error_message }}\nNext retry in: {{ $node['Process - Handle Retry'].json.next_retry_after_seconds }}s\nNext retry at: {{ $node['Process - Handle Retry'].json.next_retry_timestamp }}\"\n      },\n      \"id\": \"22yt-log-retry\",\n      \"name\": \"Log - Retry in Progress\",\n      \"type\": \"n8n-nodes-base.logStreamMessage\",\n      \"typeVersion\": 1,\n      \"position\": [2000, 550]\n    },\n    {\n      \"parameters\": {\n        \"content\": \"=❌ UPLOAD FAILED - MAX RETRIES EXCEEDED\n\nScript ID: {{ $node['09yt-send-approval-request']?.json?.script_id || 'unknown' }}\nAttempts: 3/3\n\nThe video upload could not be completed after 3 attempts with exponential backoff.\nManual intervention may be required.\n\nCommon causes:\n- Corrupted video file\n- Network connectivity issues\n- YouTube API quota exhausted\n- Account issues or channel restrictions\n\nPlease review the logs and retry manually or re-encode the video.\"\n      },\n      \"id\": \"23yt-log-max-retries\",\n      \"name\": \"Log - Max Retries Exceeded\",\n      \"type\": \"n8n-nodes-base.logStreamMessage\",\n      \"typeVersion\": 1,\n      \"position\": [2000, 650]\n    }\n  ],\n  \"connections\": {\n    \"Trigger - Receive Video\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"Process - Validate Input\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ]\n      ]\n    },\n    \"Process - Validate Input\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"Process - Check Duplicates\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ]\n      ]\n    },\n    \"Process - Check Duplicates\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"Route - Is Duplicate?\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ]\n      ]\n    },\n    \"Route - Is Duplicate?\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"Process - Check Quota\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ],\n        [\n          {\n            \"node\": \"Log - Duplicate Rejected\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ]\n      ]\n    },\n    \"Process - Check Quota\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"Process - Prepare Approval\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ]\n      ]\n    },\n    \"Process - Prepare Approval\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"Log - Awaiting Approval\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ]\n      ]\n    },\n    \"Log - Awaiting Approval\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"HTTP - Send Approval Request\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ]\n      ]\n    },\n    \"Trigger - Approval Decision\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"Process - Validate Approval Decision\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ]\n      ]\n    },\n    \"Process - Validate Approval Decision\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"Route - Is Approved?\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ]\n      ]\n    },\n    \"Route - Is Approved?\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"Log - Approved, Starting Upload\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ],\n        [\n          {\n            \"node\": \"Log - Rejected\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ]\n      ]\n    },\n    \"Log - Approved, Starting Upload\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"YouTube - Initiate Resumable Upload\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ]\n      ]\n    },\n    \"YouTube - Initiate Resumable Upload\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"Process - Extract Session URI\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ],\n        [\n          {\n            \"node\": \"Process - Handle Retry\",\n            \"type\": \"error\",\n            \"index\": 0\n          }\n        ]\n      ]\n    },\n    \"Process - Extract Session URI\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"YouTube - Upload Video Content\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ]\n      ]\n    },\n    \"YouTube - Upload Video Content\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"Process - Extract Video ID\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ],\n        [\n          {\n            \"node\": \"Process - Handle Retry\",\n            \"type\": \"error\",\n            \"index\": 0\n          }\n        ]\n      ]\n    },\n    \"Process - Extract Video ID\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"HTTP - Send Completion Notification\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ]\n      ]\n    },\n    \"HTTP - Send Completion Notification\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"Log - Upload Success\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ]\n      ]\n    },\n    \"Process - Handle Retry\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"Log - Retry in Progress\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ]\n      ]\n    },\n    \"Log - Retry in Progress\": {\n      \"main\": [\n        [\n          {\n            \"node\": \"YouTube - Initiate Resumable Upload\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ],\n        [\n          {\n            \"node\": \"Log - Max Retries Exceeded\",\n            \"type\": \"main\",\n            \"index\": 0\n          }\n        ]\n      ]\n    }\n  },\n  \"active\": false,\n  \"settings\": {\n    \"executionOrder\": \"v1\",\n    \"saveManualExecutions\": true,\n    \"callerPolicy\": \"any\"\n  },\n  \"tags\": [\"youtube-upload\", \"oauth\", \"resumable-upload\", \"approval-gate\", \"retry-handling\", \"quota-management\", \"duplicate-prevention\", \"phase-4\"]\n}
