@@ -1,0 +1,203 @@
+{
+  "name": "03-voice-generation",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "generate-voiceover",
+        "responseMode": "onReceived",
+        "method": "POST"
+      },
+      "id": "01voice-trigger-webhook",
+      "name": "Trigger - Receive Script",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 100]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Validate script metadata from Phase 2\nconst scriptData = $input.first().json;\n\nif (!scriptData.script || typeof scriptData.script !== 'string') {\n  throw new Error('Missing or invalid script field');\n}\n\nif (scriptData.script.length < 50) {\n  throw new Error('Script too short (minimum 50 characters)');\n}\n\nif (scriptData.script.length > 50000) {\n  throw new Error('Script too long (maximum 50,000 characters)');\n}\n\nreturn {\n  json: {\n    script: scriptData.script,\n    title: scriptData.title || 'Untitled',\n    script_id: scriptData.script_id || `script-${Date.now()}`,\n    language: scriptData.language || 'en-US',\n    duration_estimate: scriptData.duration_estimate || Math.ceil(scriptData.script.length / 150),\n    script_length: scriptData.script.length,\n    is_valid: true\n  }\n};"
+      },
+      "id": "02voice-process-validate",
+      "name": "Process - Validate Script",
+      "type": "n8n-nodes-base.functionItem",
+      "typeVersion": 1,
+      "position": [500, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Split long scripts into chunks to avoid API limits\nconst script = items[0].json.script;\nconst MAX_CHUNK_SIZE = 5000;\nconst CHUNK_OVERLAP = 200;\n\nconst chunks = [];\nlet index = 0;\n\nwhile (index < script.length) {\n  let end = Math.min(index + MAX_CHUNK_SIZE, script.length);\n  \n  // Avoid splitting mid-sentence\n  if (end < script.length) {\n    const lastPeriod = script.lastIndexOf('.', end);\n    if (lastPeriod > index + MAX_CHUNK_SIZE * 0.7) {\n      end = lastPeriod + 1;\n    }\n  }\n  \n  chunks.push({\n    text: script.substring(index, end),\n    chunk_index: chunks.length,\n    is_final: end === script.length\n  });\n  \n  index = end - CHUNK_OVERLAP;\n}\n\nreturn chunks.map((chunk, i) => ({\n  json: {\n    ...items[0].json,\n    chunk_text: chunk.text,\n    chunk_index: chunk.chunk_index,\n    total_chunks: chunks.length,\n    is_final_chunk: chunk.is_final\n  }\n}));"
+      },
+      "id": "03voice-split-chunks",
+      "name": "Split - Long Scripts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [750, 100]
+    },
+    {
+      "parameters": {
+        "url": "https://api.elevenlabs.io/v1/text-to-speech/{{ $env.ELEVENLABS_VOICE_ID }}",
+        "authentication": "generic",
+        "httpMethod": "POST",
+        "headers": {
+          "parameters": [
+            {
+              "name": "xi-api-key",
+              "value": "={{ $env.ELEVENLABS_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "bodyParametersUi": "json",
+        "bodyJson": "{\n  \"text\": \"={{ $node['Split - Long Scripts'].json.chunk_text }}\",\n  \"model_id\": \"{{ $env.ELEVENLABS_MODEL || 'eleven_monolingual_v1' }}\",\n  \"voice_settings\": {\n    \"stability\": {{ $env.ELEVENLABS_STABILITY || 0.75 }},\n    \"similarity_boost\": {{ $env.ELEVENLABS_SIMILARITY || 0.75 }}\n  }\n}",
+        "options": {}
+      },
+      "id": "04voice-elevenlabs-tts",
+      "name": "ElevenLabs - Generate Voice",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1000, 50]
+    },
+    {
+      "parameters": {
+        "url": "https://texttospeech.googleapis.com/v1/text:synthesize?key={{ $env.GOOGLE_CLOUD_TTS_API_KEY }}",
+        "httpMethod": "POST",
+        "bodyParametersUi": "json",
+        "bodyJson": "{\n  \"input\": {\n    \"text\": \"={{ $node['Split - Long Scripts'].json.chunk_text }}\"\n  },\n  \"voice\": {\n    \"languageCode\": \"{{ $node['Split - Long Scripts'].json.language || 'en-US' }}\",\n    \"name\": \"{{ $env.GOOGLE_CLOUD_VOICE_NAME || 'en-US-News-N' }}\"\n  },\n  \"audioConfig\": {\n    \"audioEncoding\": \"MP3\",\n    \"speakingRate\": {{ $env.GOOGLE_CLOUD_SPEAKING_RATE || 1.0 }},\n    \"pitch\": {{ $env.GOOGLE_CLOUD_PITCH || 0.0 }}\n  }\n}",
+        "options": {}
+      },
+      "id": "05voice-google-tts",
+      "name": "Google Cloud - TTS (Fallback)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1000, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract audio data from TTS response\n// Supports both ElevenLabs (binary) and Google Cloud (base64) formats\n\nconst response = $input.first().json;\n\n// Check if this is ElevenLabs response (binary audio)\nif ($input.first().binary && $input.first().binary.data) {\n  return {\n    json: {\n      audio_data: $input.first().binary.data,\n      format: 'binary',\n      provider: 'elevenlabs',\n      chunk_index: $node['Split - Long Scripts'].json.chunk_index,\n      audio_duration_estimate: Math.ceil($node['Split - Long Scripts'].json.chunk_text.length / 15) // ~15 chars per second\n    }\n  };\n}\n\n// Check if this is Google Cloud response (base64)\nif (response.audioContent) {\n  return {\n    json: {\n      audio_data: response.audioContent,\n      format: 'base64',\n      provider: 'google_cloud',\n      chunk_index: $node['Split - Long Scripts'].json.chunk_index,\n      audio_duration_estimate: Math.ceil($node['Split - Long Scripts'].json.chunk_text.length / 15)\n    }\n  };\n}\n\nthrow new Error('No audio data in TTS response');"
+      },
+      "id": "06voice-extract-audio",
+      "name": "Extract - Audio Data",
+      "type": "n8n-nodes-base.functionItem",
+      "typeVersion": 1,
+      "position": [1250, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.STORAGE_WEBHOOK_URL || 'http://localhost:5678/webhook/store-audio' }}",
+        "bodyParametersUi": "json",
+        "bodyJson": "{\n  \"audio_url\": \"https://storage.example.com/audio/{{ $node['Process - Validate Script'].json.script_id }}-chunk-{{ $node['Extract - Audio Data'].json.chunk_index }}.mp3\",\n  \"script_id\": \"={{ $node['Process - Validate Script'].json.script_id }}\",\n  \"chunk_index\": {{ $node['Extract - Audio Data'].json.chunk_index }},\n  \"total_chunks\": {{ $node['Split - Long Scripts'].json.total_chunks }},\n  \"audio_provider\": \"={{ $node['Extract - Audio Data'].json.provider }}\",\n  \"audio_format\": \"{{ $env.AUDIO_OUTPUT_FORMAT || 'mp3' }}\",\n  \"audio_duration_seconds\": {{ $node['Extract - Audio Data'].json.audio_duration_estimate }},\n  \"is_final_chunk\": {{ $node['Split - Long Scripts'].json.is_final_chunk }},\n  \"language\": \"={{ $node['Process - Validate Script'].json.language }}\",\n  \"status\": \"audio_chunk_ready\",\n  \"created_at\": \"=new Date().toISOString()\"\n}",
+        "options": {}
+      },
+      "id": "07voice-store-audio",
+      "name": "Store - Save Audio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1500, 100]
+    },
+    {
+      "parameters": {
+        "content": "=Voice Generation - Chunk {{ $node['Extract - Audio Data'].json.chunk_index + 1 }}/{{ $node['Split - Long Scripts'].json.total_chunks }} Complete\n\nProvider: {{ $node['Extract - Audio Data'].json.provider }}\nDuration: {{ $node['Extract - Audio Data'].json.audio_duration_estimate }}s\nScript ID: {{ $node['Process - Validate Script'].json.script_id }}\nStatus: audio_chunk_ready"
+      },
+      "id": "08voice-log-success",
+      "name": "Log - Voice Ready",
+      "type": "n8n-nodes-base.logStreamMessage",
+      "typeVersion": 1,
+      "position": [1750, 100]
+    }
+  ],
+  "connections": {
+    "Trigger - Receive Script": {
+      "main": [
+        [
+          {
+            "node": "Process - Validate Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process - Validate Script": {
+      "main": [
+        [
+          {
+            "node": "Split - Long Scripts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split - Long Scripts": {
+      "main": [
+        [
+          {
+            "node": "ElevenLabs - Generate Voice",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Google Cloud - TTS (Fallback)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ElevenLabs - Generate Voice": {
+      "main": [
+        [
+          {
+            "node": "Extract - Audio Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Cloud - TTS (Fallback)": {
+      "main": [
+        [
+          {
+            "node": "Extract - Audio Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract - Audio Data": {
+      "main": [
+        [
+          {
+            "node": "Store - Save Audio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store - Save Audio": {
+      "main": [
+        [
+          {
+            "node": "Log - Voice Ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "any"
+  },
+  "tags": ["voice-generation", "tts", "elevenlabs", "google-cloud", "audio", "phase-3"]
+}

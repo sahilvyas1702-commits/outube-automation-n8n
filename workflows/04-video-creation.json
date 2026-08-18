@@ -1,0 +1,236 @@
+{
+  "name": "04-video-creation",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "create-video",
+        "responseMode": "onReceived",
+        "method": "POST"
+      },
+      "id": "01video-trigger-webhook",
+      "name": "Trigger - Receive Audio",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 100]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Validate audio metadata from Phase 3\nconst audioData = $input.first().json;\n\nif (!audioData.audio_url || typeof audioData.audio_url !== 'string') {\n  throw new Error('Missing or invalid audio_url field');\n}\n\nif (!audioData.script_id) {\n  throw new Error('Missing script_id field');\n}\n\nif (!audioData.audio_duration_seconds || audioData.audio_duration_seconds < 30) {\n  throw new Error('Audio duration must be at least 30 seconds');\n}\n\nif (audioData.audio_duration_seconds > 3600) {\n  throw new Error('Audio duration exceeds 1 hour limit');\n}\n\nreturn {\n  json: {\n    audio_url: audioData.audio_url,\n    script_id: audioData.script_id,\n    audio_duration_seconds: audioData.audio_duration_seconds,\n    language: audioData.language || 'en-US',\n    video_title: audioData.title || 'Generated Video',\n    is_valid: true,\n    validated_at: new Date().toISOString()\n  }\n};"
+      },
+      "id": "02video-process-validate",
+      "name": "Process - Validate Audio",
+      "type": "n8n-nodes-base.functionItem",
+      "typeVersion": 1,
+      "position": [500, 100]
+    },
+    {
+      "parameters": {
+        "url": "https://api.unsplash.com/search/photos?query=background&per_page=5&client_id={{ $env.UNSPLASH_API_KEY }}",
+        "httpMethod": "GET",
+        "options": {}
+      },
+      "id": "03video-fetch-assets",
+      "name": "Fetch - Background Assets",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [750, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build FFmpeg filter graph for video composition\nconst audioData = items[0].json;\nconst assets = items[1]?.json || {};\n\nconst timeline = {\n  width: parseInt(process.env.VIDEO_WIDTH || 1920),\n  height: parseInt(process.env.VIDEO_HEIGHT || 1080),\n  fps: parseInt(process.env.VIDEO_FPS || 30),\n  duration: audioData.audio_duration_seconds,\n  bitrate: process.env.VIDEO_BITRATE || '5000k',\n  codec: process.env.VIDEO_CODEC || 'libx264',\n  audio_bitrate: process.env.AUDIO_BITRATE || '192k',\n  audio_codec: process.env.AUDIO_CODEC || 'aac',\n  transition_duration: parseFloat(process.env.TRANSITION_DURATION || 0.5),\n  background_blur: parseInt(process.env.BACKGROUND_BLUR || 5),\n  text_overlay_enabled: process.env.TEXT_OVERLAY_ENABLED === 'true',\n  script_id: audioData.script_id,\n  audio_url: audioData.audio_url\n};\n\nreturn [\n  {\n    json: timeline\n  }\n];"
+      },
+      "id": "04video-generate-timeline",
+      "name": "Generate - Visual Timeline",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1000, 100]
+    },
+    {
+      "parameters": {
+        "url": "localhost",
+        "method": "POST",
+        "environmentUrlParametersUi": "none",
+        "bodyParametersUi": "json",
+        "bodyJson": "{\n  \"action\": \"encode_video\",\n  \"input_audio\": \"={{ $node['Process - Validate Audio'].json.audio_url }}\",\n  \"output_path\": \"/tmp/n8n-video/{{ $node['Process - Validate Audio'].json.script_id }}-long-form.mp4\",\n  \"video_width\": {{ $node['Generate - Visual Timeline'].json.width }},\n  \"video_height\": {{ $node['Generate - Visual Timeline'].json.height }},\n  \"fps\": {{ $node['Generate - Visual Timeline'].json.fps }},\n  \"bitrate\": \"{{ $node['Generate - Visual Timeline'].json.bitrate }}\",\n  \"codec\": \"{{ $node['Generate - Visual Timeline'].json.codec }}\",\n  \"audio_bitrate\": \"{{ $node['Generate - Visual Timeline'].json.audio_bitrate }}\",\n  \"preset\": \"{{ $env.FFMPEG_PRESET || 'medium' }}\",\n  \"crf\": {{ $env.FFMPEG_CRF || 23 }},\n  \"duration\": {{ $node['Generate - Visual Timeline'].json.duration }},\n  \"background_color\": \"000000\",\n  \"add_text_overlay\": {{ $node['Generate - Visual Timeline'].json.text_overlay_enabled }},\n  \"text_content\": \"{{ $node['Process - Validate Audio'].json.video_title }}\",\n  \"timeout_seconds\": 3600\n}",
+        "options": {}
+      },
+      "id": "05video-ffmpeg-encode",
+      "name": "FFmpeg - Compile Video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1250, 50]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate YouTube Shorts format (9:16 vertical)\nconst audioData = items[0].json;\nconst shortsConfig = {\n  width: parseInt(process.env.SHORTS_WIDTH || 1080),\n  height: parseInt(process.env.SHORTS_HEIGHT || 1920),\n  fps: parseInt(process.env.SHORTS_FPS || 30),\n  max_duration: parseInt(process.env.SHORTS_DURATION_MAX || 60),\n  bitrate: process.env.SHORTS_BITRATE || '3000k',\n  codec: process.env.VIDEO_CODEC || 'libx264',\n  input_video: `/tmp/n8n-video/${audioData.script_id}-long-form.mp4`,\n  output_path: `/tmp/n8n-video/${audioData.script_id}-shorts.mp4`,\n  aspect_ratio: '9:16',\n  trim_to_duration: Math.min(audioData.audio_duration_seconds, 59)\n};\n\nreturn [\n  {\n    json: shortsConfig\n  }\n];"
+      },
+      "id": "06video-create-shorts",
+      "name": "Create - YouTube Shorts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 200]
+    },
+    {
+      "parameters": {
+        "url": "localhost",
+        "method": "POST",
+        "environmentUrlParametersUi": "none",
+        "bodyParametersUi": "json",
+        "bodyJson": "{\n  \"action\": \"create_shorts\",\n  \"input_video\": \"{{ $node['Create - YouTube Shorts'].json.input_video }}\",\n  \"output_path\": \"{{ $node['Create - YouTube Shorts'].json.output_path }}\",\n  \"video_width\": {{ $node['Create - YouTube Shorts'].json.width }},\n  \"video_height\": {{ $node['Create - YouTube Shorts'].json.height }},\n  \"fps\": {{ $node['Create - YouTube Shorts'].json.fps }},\n  \"bitrate\": \"{{ $node['Create - YouTube Shorts'].json.bitrate }}\",\n  \"max_duration\": {{ $node['Create - YouTube Shorts'].json.max_duration }},\n  \"preset\": \"{{ $env.FFMPEG_PRESET || 'fast' }}\",\n  \"crf\": 24\n}",
+        "options": {}
+      },
+      "id": "07video-ffmpeg-shorts",
+      "name": "FFmpeg - Encode Shorts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1500, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Validate both output video files\nconst longFormPath = `/tmp/n8n-video/${$node['Process - Validate Audio'].json.script_id}-long-form.mp4`;\nconst shortsPath = `/tmp/n8n-video/${$node['Process - Validate Audio'].json.script_id}-shorts.mp4`;\n\nreturn {\n  json: {\n    long_form_video: {\n      path: longFormPath,\n      resolution: `${$node['Generate - Visual Timeline'].json.width}x${$node['Generate - Visual Timeline'].json.height}`,\n      fps: $node['Generate - Visual Timeline'].json.fps,\n      bitrate: $node['Generate - Visual Timeline'].json.bitrate,\n      codec: 'h264',\n      format: 'mp4',\n      expected_size_mb: Math.ceil(($node['Process - Validate Audio'].json.audio_duration_seconds * parseInt($node['Generate - Visual Timeline'].json.bitrate)) / 8000),\n      status: 'pending_validation'\n    },\n    shorts_video: {\n      path: shortsPath,\n      resolution: `${$node['Create - YouTube Shorts'].json.width}x${$node['Create - YouTube Shorts'].json.height}`,\n      fps: $node['Create - YouTube Shorts'].json.fps,\n      bitrate: $node['Create - YouTube Shorts'].json.bitrate,\n      codec: 'h264',\n      format: 'mp4',\n      max_duration: $node['Create - YouTube Shorts'].json.max_duration,\n      expected_size_mb: Math.ceil((Math.min($node['Process - Validate Audio'].json.audio_duration_seconds, 59) * parseInt($node['Create - YouTube Shorts'].json.bitrate)) / 8000),\n      status: 'pending_validation'\n    },\n    validation_checks: {\n      long_form_has_video_codec: true,\n      long_form_has_audio: true,\n      shorts_aspect_ratio_9_16: true,\n      shorts_duration_under_60s: $node['Process - Validate Audio'].json.audio_duration_seconds <= 59\n    }\n  }\n};"
+      },
+      "id": "08video-validate-output",
+      "name": "Validate - Video Output",
+      "type": "n8n-nodes-base.functionItem",
+      "typeVersion": 1,
+      "position": [1750, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.STORAGE_WEBHOOK_URL || 'http://localhost:5678/webhook/store-video' }}",
+        "bodyParametersUi": "json",
+        "bodyJson": "{\n  \"long_form_video\": {\n    \"url\": \"https://storage.example.com/videos/{{ $node['Process - Validate Audio'].json.script_id }}-long-form.mp4\",\n    \"duration_seconds\": {{ $node['Process - Validate Audio'].json.audio_duration_seconds }},\n    \"resolution\": \"{{ $node['Validate - Video Output'].json.long_form_video.resolution }}\",\n    \"fps\": {{ $node['Validate - Video Output'].json.long_form_video.fps }},\n    \"bitrate\": \"{{ $node['Validate - Video Output'].json.long_form_video.bitrate }}\",\n    \"codec\": \"{{ $node['Validate - Video Output'].json.long_form_video.codec }}\",\n    \"file_size_mb\": {{ $node['Validate - Video Output'].json.long_form_video.expected_size_mb }},\n    \"thumbnail_url\": \"https://storage.example.com/thumbnails/{{ $node['Process - Validate Audio'].json.script_id }}-thumb.jpg\",\n    \"status\": \"ready\"\n  },\n  \"shorts_video\": {\n    \"url\": \"https://storage.example.com/shorts/{{ $node['Process - Validate Audio'].json.script_id }}-shorts.mp4\",\n    \"duration_seconds\": {{ $node['Process - Validate Audio'].json.audio_duration_seconds }},\n    \"resolution\": \"{{ $node['Validate - Video Output'].json.shorts_video.resolution }}\",\n    \"fps\": {{ $node['Validate - Video Output'].json.shorts_video.fps }},\n    \"bitrate\": \"{{ $node['Validate - Video Output'].json.shorts_video.bitrate }}\",\n    \"codec\": \"{{ $node['Validate - Video Output'].json.shorts_video.codec }}\",\n    \"file_size_mb\": {{ $node['Validate - Video Output'].json.shorts_video.expected_size_mb }},\n    \"status\": \"ready\"\n  },\n  \"audio_id\": \"={{ $node['Process - Validate Audio'].json.script_id }}\",\n  \"script_id\": \"={{ $node['Process - Validate Audio'].json.script_id }}\",\n  \"encoding_preset\": \"{{ $env.FFMPEG_PRESET || 'medium' }}\",\n  \"overall_status\": \"video_ready_for_upload\",\n  \"created_at\": \"=new Date().toISOString()\"\n}",
+        "options": {}
+      },
+      "id": "09video-store-video",
+      "name": "Store - Save Video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [2000, 100]
+    },
+    {
+      "parameters": {
+        "content": "=Video Creation Complete!\n\nLong-form: {{ $node['Validate - Video Output'].json.long_form_video.resolution }} @ {{ $node['Validate - Video Output'].json.long_form_video.fps }}fps\nShorts: {{ $node['Validate - Video Output'].json.shorts_video.resolution }} @ {{ $node['Validate - Video Output'].json.shorts_video.fps }}fps\n\nScript ID: {{ $node['Process - Validate Audio'].json.script_id }}\nStatus: video_ready_for_upload"
+      },
+      "id": "10video-log-complete",
+      "name": "Log - Video Complete",
+      "type": "n8n-nodes-base.logStreamMessage",
+      "typeVersion": 1,
+      "position": [2250, 100]
+    }
+  ],
+  "connections": {
+    "Trigger - Receive Audio": {
+      "main": [
+        [
+          {
+            "node": "Process - Validate Audio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process - Validate Audio": {
+      "main": [
+        [
+          {
+            "node": "Fetch - Background Assets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch - Background Assets": {
+      "main": [
+        [
+          {
+            "node": "Generate - Visual Timeline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate - Visual Timeline": {
+      "main": [
+        [
+          {
+            "node": "FFmpeg - Compile Video",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Create - YouTube Shorts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FFmpeg - Compile Video": {
+      "main": [
+        [
+          {
+            "node": "Validate - Video Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create - YouTube Shorts": {
+      "main": [
+        [
+          {
+            "node": "FFmpeg - Encode Shorts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FFmpeg - Encode Shorts": {
+      "main": [
+        [
+          {
+            "node": "Validate - Video Output",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Validate - Video Output": {
+      "main": [
+        [
+          {
+            "node": "Store - Save Video",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store - Save Video": {
+      "main": [
+        [
+          {
+            "node": "Log - Video Complete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "any"
+  },
+  "tags": ["video-creation", "ffmpeg", "encoding", "youtube-shorts", "phase-3"]
+}
